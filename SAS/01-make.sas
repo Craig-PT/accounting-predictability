@@ -68,7 +68,7 @@ data out.crsp_rets (keep = PERMNO DATE SICCD EXCHCD SHRCD RET);
 	merge out.crsp_rets (in=INKEEP) dlistreturn (in=INDLIST);
 	by PERMNO;
 	if INKEEP;
-	if (last.PERMNO=1 and INDLIST=1 and DLRET > .Z  and RET > .Z) then RET = (1+RET)*(1+DLRET)-1;
+	if (last.PERMNO=1 and INDLIST=1 and not missing(DLRET) and RET > .Z) then RET = (1+RET)*(1+DLRET)-1;
 	if (last.PERMNO=1 and INDLIST=1 and DLRET > .Z  and RET le .Z) then RET=DLRET;
 run;
 

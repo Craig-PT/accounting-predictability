@@ -1,3 +1,7 @@
+# Pycharm files
+.idea*
+
+# Original ignore files
 *.acn
 *.acr
 *.alg
