@@ -13,19 +13,20 @@ signon username="eddyhu" password="&wrds_pass";
 /* Also clears the log*/
 %MACRO RSUBMIT(dir=);
 DM 'output;clear;log;clear;';
-%syslput remote_dir=&dir;
+/* syslput - creates new macro vbl in server session and assigns value from client session */
+%syslput remote_dir=&dir; 		
 
 RSUBMIT;
 
 /* Check if directory exists on the remote server and if not create it and set the library */
 %MACRO chk_dir(dir=) ;
 	%LOCAL rc fileref ; 
-	%LET rc = %SYSFUNC(filename(fileref,&remote_dir)) ; 
+	%LET rc = %SYSFUNC(filename(fileref, &remote_dir)) ; 
 	%IF %SYSFUNC(fexist(&fileref))  %THEN 
 		%PUT NOTE: The directory "&remote_dir" exists ; 
 	%ELSE 
 	%DO ; 
-	%SYSEXEC mkdir   &remote_dir ; 
+	%SYSEXEC mkdir &remote_dir ; 
 	%PUT %SYSFUNC(sysmsg()) The directory has been created. ; 
 	%END ; 
 	%LET rc=%SYSFUNC(filename(fileref)) ; 
@@ -60,6 +61,7 @@ quit;
 data dlistreturn (keep=PERMNO DLRET);
 	set crsp.mse;
 	where (event = "DELIST" and dlstcd > 100);
+	/* TODO: Check missing values .S .T */
 	if dlret = .S or dlret = .T then dlret=-0.55;
 run;
 
@@ -68,8 +70,8 @@ data out.crsp_rets (keep = PERMNO DATE SICCD EXCHCD SHRCD RET);
 	merge out.crsp_rets (in=INKEEP) dlistreturn (in=INDLIST);
 	by PERMNO;
 	if INKEEP;
-	if (last.PERMNO=1 and INDLIST=1 and not missing(DLRET) and RET > .Z) then RET = (1+RET)*(1+DLRET)-1;
-	if (last.PERMNO=1 and INDLIST=1 and DLRET > .Z  and RET le .Z) then RET=DLRET;
+	if (last.PERMNO=1 and INDLIST=1 and not missing(DLRET) and not missing(RET)) then RET = (1+RET)*(1+DLRET)-1;
+	if (last.PERMNO=1 and INDLIST=1 and not missing(DLRET)  and RET le .Z) then RET=DLRET;
 run;
 
 /* CRSP Characteristics */
@@ -84,22 +86,30 @@ proc sql;
 quit;
 
 ENDRSUBMIT;
+
+
 %RSUBMIT(dir="/sastemp7/eh7");
 
 /* Calculate momentum from CRSP extract */
 proc expand data=out.crsp_chars(keep=permno date ret) out=out.mom;
 	by permno;
+	/* Renames RET as VOL, using transform - movprod backwards moving product, 
+	+1 adds 1 to RET, then calculates movprod on previous 11 periods and subtracts 1, 
+	taking it back to % terms, trimleft as below.*/
 	convert RET = MOM / transform = (+1 movprod 11 -1 trimleft 10);
 run;
 
 /* Calculate monthly volatilities from DSF */
 proc expand data=crsp.dsf(keep=permno date ret) out=out.vol method = none;
 	by permno;
+	/* Renames RET as VOL, using transformout - movstd backwards looking std, trimleft sets 
+	values to missing until have 60 observations from LHS.*/
 	convert RET = VOL / transformout = (movstd 60 trimleft 59);
 	id DATE;
 run;
 
 ENDRSUBMIT;
+
 
 %RSUBMIT(dir="/sastemp7/eh7")
 
@@ -121,7 +131,9 @@ proc sql;
 	from out.crsp_chars as a
 	left join out.mom as b
 	on a.PERMNO = b.PERMNO 
-	and intnx('month',a.DATE,0,'E') = intnx('month',b.DATE,1,'E')
+	/* intnx aligns dates, shifts month to 'E'nd of interval, first by 0 periods 
+	and by 1 period for MOM. */
+	and intnx('month', a.DATE, 0, 'E') = intnx('month', b.DATE, 1, 'E')
 	;
 quit;
 
@@ -133,12 +145,13 @@ proc sql;
 	left join
 	out.crsp_chars as b
 	on a.PERMNO = b.PERMNO
-	and intnx('month',a.DATE,0,'E') = intnx('month',b.DATE,1,'E')
+	and intnx('month', a.DATE, 0, 'E') = intnx('month', b.DATE, 1, 'E')
 	order by a.PERMNO, a.DATE
 	;
 quit;
 
 ENDRSUBMIT;
+
 
 %RSUBMIT(dir="/sastemp7/eh7");
 /* Download n obs */
@@ -146,19 +159,21 @@ proc download data=out.crspx(obs=max) out=crspx;
 run;
 ENDRSUBMIT;
 
+
 %RSUBMIT(dir="/sastemp7/eh7");
 /* COMPUSTAT Variables */
 %LET comp_vars = GVKEY INDFMT DATAFMT POPSRC CONSOL CSHPRI PRCC_F DVPSX_F SALE DATADATE SEQ CEQ 
 	TXDITC TXDB PSTKRV PSTK PSTKL AT PPEGT PPENT NI CHE XOPR XINT LT DLTT DLC XRD XAD WCAP IB INVT GP REVT COGS;
 
-/* First COMPUSTAT extract with beginning & end dates for fiscal years */
+/* First COMPUSTAT extract with beginning & end dates for fiscal years, genmax keeps historic versions */
 data out.compx(genmax=5);
 	set comp.funda(keep=&comp_vars);
+	* indfmt, datafmt, popsrc and consol exclude doubles;
 	if indfmt='INDL' and datafmt='STD' and popsrc='D' and consol='C';
 	drop datafmt popsrc consol;  * Only used for the screening; 
 	* create begin and end dates for fiscal year;
 	endyr=datadate; format endyr date9.;
-	begyr=intnx('month',endyr,-11,'beg'); format begyr date9.; 
+	begyr=intnx('month', endyr, -11, 'beg'); format begyr date9.; 
 	*intnx(interval, from, n, 'aligment');
 run;
 
@@ -168,8 +183,8 @@ proc sql;
 	select
 		distinct a.GVKEY, b.LPERMNO as PERMNO, a.DATADATE,
 		(CSHPRI*PRCC_F) as ME,
-		coalesce(PSTKRV,PSTKL,PSTK,0) as PS,
-		coalesce(TXDITC, TXDB,0) as DEFTAX,
+		coalesce(PSTKRV, PSTKL, PSTK, 0) as PS,
+		coalesce(TXDITC, TXDB, 0) as DEFTAX,
 		case when SEQ is not null then SEQ 
 		when CEQ is not null and PSTK is not null then CEQ + PSTK
 		when AT is not null and LT is not null then AT-LT else -999 end as SHE,
@@ -189,7 +204,7 @@ quit;
 proc sql;
 	create table out.compx as
 	select a.GVKEY, a.PERMNO, a.DATADATE,
-	coalesce(input(c.SIC, 11.),b.SICCD) as SICH,
+	coalesce(input(c.SIC, 11.), b.SICCD) as SICH,
 	b.SHRCD, b.EXCHCD,
 	*
 	from out.compx as a left outer join crsp.mseexchdates as b 
